@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom'
+import { HashRouter, Routes, Route, NavLink } from 'react-router-dom'
 import { useToast } from './components/ToastProvider'
 import { Modal } from './components/Modal'
 
@@ -357,7 +357,7 @@ function ItemDetailPage() {
 
 export default function App() {
   return (
-    <BrowserRouter>
+    <HashRouter>
       <Layout>
         <Routes>
           <Route path="/" element={<HomePage />} />
@@ -368,6 +368,6 @@ export default function App() {
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>
       </Layout>
-    </BrowserRouter>
+    </HashRouter>
   )
 }
