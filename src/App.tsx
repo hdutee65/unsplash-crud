@@ -1,3 +1,4 @@
+import React from 'react'
 import { HashRouter, Routes, Route, NavLink } from 'react-router-dom'
 import { useToast } from './components/ToastProvider'
 import { Modal } from './components/Modal'
