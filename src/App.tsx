@@ -322,11 +322,11 @@ function SettingsPage() {
 function ItemDetailPage() {
   const params = (window as any).location.pathname.split('/')
   const id = params[params.length - 1]
-  const [item, setItem] = React.useState<Item | null>(() => {
+  const item = React.useMemo(() => {
     const raw = localStorage.getItem('items')
     const arr: Item[] = raw ? JSON.parse(raw) : []
     return arr.find((x) => x.id === id) || null
-  })
+  }, [id])
   const [title, setTitle] = React.useState(item?.title || '')
   const [notes, setNotes] = React.useState(item?.notes || '')
   React.useEffect(() => {
