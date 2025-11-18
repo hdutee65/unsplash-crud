@@ -1,26 +1,38 @@
 import React from 'react'
-import { HashRouter, Routes, Route, NavLink, useNavigate, useParams } from 'react-router-dom'
+import { HashRouter, Routes, Route, NavLink, useNavigate, useParams, useLocation } from 'react-router-dom'
 import { useToast } from './components/ToastProvider'
 import { Modal } from './components/Modal'
 import { searchUnsplashPhotos } from './lib/unsplash'
 import type { UnsplashPhoto } from './lib/unsplash'
 import { useLocalStorage } from './hooks/useLocalStorage'
+import { useAuth } from './context/AuthContext'
+import { useFavorites, type Favorite } from './context/FavoritesContext'
+import { useTheme } from './context/ThemeContext'
+import {
+  DndContext,
+  closestCenter,
+  MouseSensor,
+  TouchSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core'
+import {
+  SortableContext,
+  arrayMove,
+  rectSortingStrategy,
+  useSortable,
+} from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
 
 type Item = { id: string; title: string; notes?: string; createdAt?: number }
-
-type Favorite = {
-  id: string
-  photo: UnsplashPhoto
-  note: string
-  createdAt: number
-  updatedAt: number
-}
 
 const sectionClass = 'mx-auto w-full max-w-6xl px-4 py-12'
 
 const navLinks = [
   { to: '/', label: 'Home', end: true },
   { to: '/gallery', label: 'Gallery' },
+  { to: '/storyboard', label: 'Storyboard' },
   { to: '/items', label: 'Notes' },
   { to: '/about', label: 'About' },
   { to: '/settings', label: 'Settings' },
@@ -34,36 +46,43 @@ function createId() {
 }
 
 function Layout({ children }: { children: React.ReactNode }) {
+  const { theme } = useTheme()
   return (
-    <div className="flex min-h-screen flex-col">
-      <header className="sticky top-0 z-20 border-b border-white/10 bg-slate-950/70 backdrop-blur-xl">
-        <div className="mx-auto flex w-full max-w-6xl items-center justify-between px-4 py-4">
+    <div className={`flex min-h-screen flex-col theme-${theme}`}>
+      <header className="header-glass sticky top-0 z-20 border-b border-white/10 backdrop-blur-xl">
+        <div className="mx-auto flex w-full max-w-6xl flex-col gap-4 px-4 py-4 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex items-center gap-3">
-            <span className="rounded-full bg-emerald-400/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-emerald-200">
+            <span className="rounded-full bg-accent/20 px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-accent">
               Unsplash CRUD
             </span>
-            <span className="hidden text-sm text-white/60 sm:inline">React + Vite + Tailwind</span>
+            <span className="hidden text-sm text-muted sm:inline">React + Vite + Tailwind</span>
           </div>
-          <nav className="flex flex-wrap items-center gap-2">
-            {navLinks.map((link) => (
-              <NavLink
-                key={link.to}
-                to={link.to}
-                end={link.end}
-                className={({ isActive }) =>
-                  `rounded-full px-4 py-1.5 text-sm font-medium transition ${
-                    isActive ? 'bg-white text-slate-900 shadow-lg shadow-emerald-500/20' : 'text-white/70 hover:bg-white/10 hover:text-white'
-                  }`
-                }
-              >
-                {link.label}
-              </NavLink>
-            ))}
-          </nav>
+          <div className="flex flex-wrap items-center gap-3">
+            <nav className="flex flex-wrap items-center gap-2">
+              {navLinks.map((link) => (
+                <NavLink
+                  key={link.to}
+                  to={link.to}
+                  end={link.end}
+                  className={({ isActive }) =>
+                    `rounded-full px-4 py-1.5 text-sm font-medium transition ${
+                      isActive
+                        ? 'bg-foreground text-background shadow-lg shadow-accent/20'
+                        : 'text-muted hover:bg-surface hover:text-foreground'
+                    }`
+                  }
+                >
+                  {link.label}
+                </NavLink>
+              ))}
+            </nav>
+            <ThemeToggleButton />
+            <AuthControls />
+          </div>
         </div>
       </header>
       <main className="flex-1">{children}</main>
-      <footer className="border-t border-white/5 py-6 text-center text-xs text-white/70">
+      <footer className="border-t border-white/5 py-6 text-center text-xs text-muted">
         © {new Date().getFullYear()} Unsplash CRUD · Built with React, Vite, Tailwind, and the Unsplash API
       </footer>
     </div>
@@ -362,6 +381,7 @@ function ItemsPage() {
 
 function GalleryPage() {
   const { show } = useToast()
+  const { favorites, saveFavorite, removeFavorite, clearFavorites, syncing, syncError, lastSyncedAt, refreshFromCloud, isCloudEnabled } = useFavorites()
   const [searchInput, setSearchInput] = React.useState('nature')
   const [query, setQuery] = React.useState('nature')
   const [page, setPage] = React.useState(1)
@@ -370,9 +390,11 @@ function GalleryPage() {
   const [error, setError] = React.useState<string | null>(null)
   const [hasMore, setHasMore] = React.useState(true)
   const [perPage, setPerPage] = useLocalStorage<number>('gallery-per-page', 12)
-  const [favorites, setFavorites] = useLocalStorage<Favorite[]>('photo-favorites', [])
+  const [history, setHistory] = useLocalStorage<string[]>('gallery-search-history', ['nature', 'ocean', 'city lights'])
+  const [autoLoad, setAutoLoad] = useLocalStorage<boolean>('gallery-autoload', true)
   const [activePhoto, setActivePhoto] = React.useState<UnsplashPhoto | null>(null)
   const [noteDraft, setNoteDraft] = React.useState('')
+  const loadMoreRef = React.useRef<HTMLDivElement | null>(null)
 
   React.useEffect(() => {
     let ignore = false
@@ -392,11 +414,9 @@ function GalleryPage() {
           setHasMore(page < data.total_pages)
         }
       } catch (err) {
-        if (!ignore) {
-          if ((err as Error).name !== 'AbortError') {
-            setError((err as Error).message)
-            show({ title: 'Unsplash error', description: (err as Error).message, tone: 'error' })
-          }
+        if (!ignore && (err as Error).name !== 'AbortError') {
+          setError((err as Error).message)
+          show({ title: 'Unsplash error', description: (err as Error).message, tone: 'error' })
         }
       } finally {
         if (!ignore) setLoading(false)
@@ -418,7 +438,26 @@ function GalleryPage() {
     setNoteDraft(existing?.note ?? '')
   }, [activePhoto, favorites])
 
-  function handleSearch(e: React.FormEvent<HTMLFormElement>) {
+  React.useEffect(() => {
+    if (!autoLoad) return
+    const target = loadMoreRef.current
+    if (!target) return
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const [entry] = entries
+        if (entry.isIntersecting && hasMore && !loading) {
+          setPage((prev) => prev + 1)
+        }
+      },
+      { rootMargin: '300px' },
+    )
+    observer.observe(target)
+    return () => observer.disconnect()
+  }, [autoLoad, hasMore, loading])
+
+  const favoriteLookup = React.useMemo(() => new Map(favorites.map((fav) => [fav.photo.id, fav])), [favorites])
+
+  const handleSearch = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
     const trimmed = searchInput.trim()
     if (!trimmed) {
@@ -427,45 +466,69 @@ function GalleryPage() {
     }
     setQuery(trimmed)
     setPage(1)
+    setHistory((prev) => [trimmed, ...prev.filter((term) => term !== trimmed)].slice(0, 6))
   }
 
-  function handleChangePerPage(value: number) {
+  const handleHistorySelect = (term: string) => {
+    setSearchInput(term)
+    setQuery(term)
+    setPage(1)
+  }
+
+  const clearHistory = () => setHistory([])
+
+  const handleChangePerPage = (value: number) => {
     setPerPage(value)
     setPage(1)
   }
 
-  function openNoteModal(photo: UnsplashPhoto) {
+  const openNoteModal = (photo: UnsplashPhoto) => {
     setActivePhoto(photo)
   }
 
-  function closeNoteModal() {
-    setActivePhoto(null)
-  }
+  const closeNoteModal = () => setActivePhoto(null)
 
-  function handleSaveFavorite() {
+  const handleSaveFavorite = async () => {
     if (!activePhoto) return
-    const trimmed = noteDraft.trim()
-    if (!trimmed) {
+    if (!noteDraft.trim()) {
       show({ title: 'Add a note before saving', tone: 'error' })
       return
     }
-    setFavorites((prev) => {
-      const existing = prev.find((fav) => fav.photo.id === activePhoto.id)
-      if (existing) {
-        return prev.map((fav) => (fav.id === existing.id ? { ...fav, note: trimmed, updatedAt: Date.now() } : fav))
-      }
-      return [{ id: createId(), photo: activePhoto, note: trimmed, createdAt: Date.now(), updatedAt: Date.now() }, ...prev]
-    })
-    show({ title: 'Note saved', tone: 'success' })
-    closeNoteModal()
+    try {
+      await saveFavorite(activePhoto, noteDraft)
+      show({ title: 'Note saved', tone: 'success' })
+      closeNoteModal()
+    } catch (err) {
+      show({ title: 'Could not save', description: (err as Error).message, tone: 'error' })
+    }
   }
 
-  function handleRemoveFavorite(photoId: string) {
-    setFavorites((prev) => prev.filter((fav) => fav.photo.id !== photoId))
-    show({ title: 'Removed from favorites', tone: 'info' })
+  const handleRemoveFavorite = async (photoId: string) => {
+    try {
+      await removeFavorite(photoId)
+      show({ title: 'Removed from favorites', tone: 'info' })
+    } catch (err) {
+      show({ title: 'Could not remove', description: (err as Error).message, tone: 'error' })
+    }
   }
 
-  const favoriteLookup = React.useMemo(() => new Map(favorites.map((fav) => [fav.photo.id, fav])), [favorites])
+  const handleClearFavorites = async () => {
+    try {
+      await clearFavorites()
+      show({ title: 'Cleared favorites', tone: 'info' })
+    } catch (err) {
+      show({ title: 'Unable to clear', description: (err as Error).message, tone: 'error' })
+    }
+  }
+
+  const handleRefreshCloud = async () => {
+    try {
+      await refreshFromCloud()
+      show({ title: 'Synced favorites', tone: 'success' })
+    } catch (err) {
+      show({ title: 'Sync failed', description: (err as Error).message, tone: 'error' })
+    }
+  }
 
   return (
     <section className={sectionClass}>
@@ -475,11 +538,25 @@ function GalleryPage() {
             <div>
               <p className="text-sm font-semibold uppercase tracking-[0.4em] text-emerald-300">Unsplash Gallery</p>
               <h2 className="mt-3 text-3xl font-semibold text-white">Search millions of photos in real time.</h2>
-              <p className="mt-2 text-white/70">Responsive grid, lazy loading, hover reveals, and note-taking with a single click.</p>
+              <p className="mt-2 text-white/70">Responsive grid, lazy loading / auto-scroll, search history chips, and synced notes.</p>
             </div>
-            <div className="rounded-2xl border border-white/10 bg-white/5 px-5 py-4 text-sm text-white/80">
-              API status:{' '}
-              <span className="font-semibold text-emerald-300">{import.meta.env.VITE_UNSPLASH_ACCESS_KEY ? 'Ready' : 'Missing key'}</span>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="rounded-2xl border border-white/10 bg-white/5 px-5 py-4 text-sm text-white/80">
+                API status:{' '}
+                <span className="font-semibold text-emerald-300">{import.meta.env.VITE_UNSPLASH_ACCESS_KEY ? 'Ready' : 'Missing key'}</span>
+              </div>
+              <div className="rounded-2xl border border-white/10 bg-white/5 px-5 py-4 text-sm text-white/80">
+                Favorites:{' '}
+                <span className="font-semibold text-emerald-300">
+                  {isCloudEnabled ? (syncing ? 'Syncing…' : 'Synced to cloud') : 'Stored locally'}
+                </span>
+                {lastSyncedAt ? <div className="text-xs text-white/60">Updated {new Date(lastSyncedAt).toLocaleTimeString()}</div> : null}
+                {isCloudEnabled ? (
+                  <button onClick={handleRefreshCloud} className="mt-2 text-xs text-white underline-offset-4 hover:underline">
+                    Sync now
+                  </button>
+                ) : null}
+              </div>
             </div>
           </div>
           <form onSubmit={handleSearch} className="mt-6 flex flex-col gap-4 lg:flex-row">
@@ -513,12 +590,42 @@ function GalleryPage() {
               Search
             </button>
           </form>
+          <div className="mt-4 flex flex-wrap items-center gap-3 text-xs text-white/70">
+            <label className="inline-flex items-center gap-2">
+              <input type="checkbox" checked={autoLoad} onChange={(e) => setAutoLoad(e.target.checked)} />
+              Auto load on scroll
+            </label>
+            {history.length ? (
+              <>
+                <span>Recent:</span>
+                {history.map((term) => (
+                  <button
+                    key={term}
+                    type="button"
+                    onClick={() => handleHistorySelect(term)}
+                    className="rounded-full border border-white/20 px-3 py-1 text-white/80 hover:bg-white/10"
+                  >
+                    {term}
+                  </button>
+                ))}
+                <button onClick={clearHistory} className="text-white/60 underline-offset-4 hover:underline">
+                  Clear
+                </button>
+              </>
+            ) : null}
+          </div>
         </div>
 
         {error ? (
           <div className="rounded-3xl border border-rose-400/30 bg-rose-500/10 p-6 text-rose-100">
-            <p className="font-semibold">We hit a snag</p>
+            <p className="font-semibold">Unsplash error</p>
             <p className="text-sm">{error}</p>
+          </div>
+        ) : null}
+        {syncError ? (
+          <div className="rounded-3xl border border-amber-400/50 bg-amber-500/10 p-6 text-amber-100">
+            <p className="font-semibold">Sync issue</p>
+            <p className="text-sm">{syncError}</p>
           </div>
         ) : null}
 
@@ -586,30 +693,29 @@ function GalleryPage() {
         ) : null}
 
         {!loading && hasMore && photos.length > 0 ? (
-          <div className="flex justify-center">
-            <button
-              onClick={() => setPage((prev) => prev + 1)}
-              className="rounded-full border border-white/20 px-8 py-3 text-white transition hover:border-white/60 hover:bg-white/10"
-            >
-              Load more
-            </button>
+          <div className="flex flex-col items-center gap-3">
+            {!autoLoad ? (
+              <button
+                onClick={() => setPage((prev) => prev + 1)}
+                className="rounded-full border border-white/20 px-8 py-3 text-white transition hover:border-white/60 hover:bg-white/10"
+              >
+                Load more
+              </button>
+            ) : (
+              <p className="text-sm text-white/60">Scroll to auto-load more results</p>
+            )}
+            <div ref={loadMoreRef} className="h-px w-full" aria-hidden />
           </div>
         ) : null}
 
         {favorites.length > 0 ? (
           <div className="space-y-4">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <p className="text-sm font-semibold uppercase tracking-[0.4em] text-emerald-300">Saved notes</p>
                 <h3 className="text-2xl font-semibold text-white">Favorites ({favorites.length})</h3>
               </div>
-              <button
-                onClick={() => {
-                  setFavorites([])
-                  show({ title: 'Cleared favorites', tone: 'info' })
-                }}
-                className="text-sm text-white/60 underline-offset-4 hover:text-white hover:underline"
-              >
+              <button onClick={handleClearFavorites} className="text-sm text-white/60 underline-offset-4 hover:text-white hover:underline">
                 Clear all
               </button>
             </div>
@@ -688,6 +794,228 @@ function GalleryPage() {
   )
 }
 
+function StoryboardPage() {
+  const { favorites } = useFavorites()
+  const { show } = useToast()
+  const location = useLocation()
+  const sensors = useSensors(
+    useSensor(MouseSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(TouchSensor, { pressDelay: 120, activationConstraint: { distance: 6 } }),
+  )
+  const [boardIds, setBoardIds] = React.useState<string[]>([])
+  const [shareCopied, setShareCopied] = React.useState(false)
+
+  React.useEffect(() => {
+    setBoardIds((prev) => {
+      const filtered = prev.filter((id) => favorites.some((fav) => fav.id === id))
+      const missing = favorites.map((fav) => fav.id).filter((id) => !filtered.includes(id))
+      return filtered.concat(missing)
+    })
+  }, [favorites])
+
+  const boardFavorites = React.useMemo(
+    () => boardIds.map((id) => favorites.find((fav) => fav.id === id)).filter((fav): fav is Favorite => Boolean(fav)),
+    [boardIds, favorites],
+  )
+
+  const sharedPreview = React.useMemo(() => {
+    if (typeof window === 'undefined') return null
+    const params = new URLSearchParams(location.search)
+    const raw = params.get('data')
+    if (!raw) return null
+    try {
+      const decoded = decodeURIComponent(window.atob(raw))
+      const parsed = JSON.parse(decoded) as {
+        createdAt: number
+        items: { note: string; photo: { id: string; regular: string; thumb?: string; alt?: string } }[]
+      }
+      if (!parsed.items?.length) return null
+      return parsed
+    } catch (error) {
+      console.warn('Invalid storyboard data', error)
+      return null
+    }
+  }, [location.search])
+
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event
+    if (!over || active.id === over.id) return
+    setBoardIds((items) => {
+      const oldIndex = items.indexOf(String(active.id))
+      const newIndex = items.indexOf(String(over.id))
+      return arrayMove(items, oldIndex, newIndex)
+    })
+  }
+
+  const toggleSelection = (id: string) => {
+    setBoardIds((prev) => (prev.includes(id) ? prev.filter((value) => value !== id) : [...prev, id]))
+  }
+
+  const downloadStoryboard = () => {
+    if (!boardFavorites.length) {
+      show({ title: 'Select cards first', tone: 'error' })
+      return
+    }
+    const payload = {
+      generatedAt: new Date().toISOString(),
+      items: boardFavorites.map((fav) => ({
+        note: fav.note,
+        photo: {
+          id: fav.photo.id,
+          description: fav.photo.description ?? fav.photo.alt_description,
+          urls: fav.photo.urls,
+          author: fav.photo.user.name,
+          link: fav.photo.links.html,
+        },
+      })),
+    }
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `storyboard-${Date.now()}.json`
+    anchor.click()
+    URL.revokeObjectURL(url)
+    show({ title: 'Storyboard downloaded', tone: 'success' })
+  }
+
+  const copyShareLink = async () => {
+    if (!boardFavorites.length) {
+      show({ title: 'Select cards first', tone: 'error' })
+      return
+    }
+    if (typeof window === 'undefined') return
+    const payload = {
+      createdAt: Date.now(),
+      items: boardFavorites.map((fav) => ({
+        note: fav.note,
+        photo: {
+          id: fav.photo.id,
+          regular: fav.photo.urls.regular,
+          thumb: fav.photo.urls.thumb,
+          alt: fav.photo.alt_description ?? fav.photo.description ?? undefined,
+        },
+      })),
+    }
+    const encoded = window.btoa(encodeURIComponent(JSON.stringify(payload)))
+    const base = `${window.location.origin}${window.location.pathname}#/storyboard`
+    const fullUrl = `${base}?data=${encoded}`
+    await navigator.clipboard?.writeText(fullUrl)
+    setShareCopied(true)
+    show({ title: 'Share link copied', tone: 'success' })
+    setTimeout(() => setShareCopied(false), 2000)
+  }
+
+  return (
+    <section className={sectionClass}>
+      <div className="space-y-8">
+        <div className="rounded-[32px] border border-white/10 bg-white/5 p-8 shadow-2xl">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <p className="text-sm font-semibold uppercase tracking-[0.4em] text-emerald-300">Storyboard</p>
+              <h2 className="mt-3 text-3xl font-semibold text-white">Drag, reorder, and share curated image narratives.</h2>
+              <p className="text-white/70">Pick any favorites, arrange them via drag-and-drop, export JSON, or share a view-only link.</p>
+            </div>
+            <div className="flex flex-wrap gap-3">
+              <button
+                onClick={downloadStoryboard}
+                className="rounded-full border border-white/20 px-4 py-2 text-sm text-white hover:bg-white/10"
+              >
+                Download JSON
+              </button>
+              <button
+                onClick={copyShareLink}
+                className="rounded-full bg-white/90 px-4 py-2 text-sm font-semibold text-slate-900 shadow hover:-translate-y-0.5"
+              >
+                {shareCopied ? 'Link copied!' : 'Copy share link'}
+              </button>
+            </div>
+          </div>
+          <div className="mt-4 flex gap-6 text-sm text-white/70">
+            <div>{favorites.length} favorites saved</div>
+            <div>{boardFavorites.length} cards on board</div>
+          </div>
+        </div>
+
+        {favorites.length === 0 ? (
+          <EmptyState title="No favorites yet" description="Save photos from the gallery to build a storyboard." />
+        ) : (
+          <div className="grid gap-6 lg:grid-cols-[280px_1fr]">
+            <div className="rounded-3xl border border-white/10 bg-white/5 p-4 shadow-lg shadow-slate-900/60">
+              <div className="flex items-center justify-between">
+                <h3 className="text-lg font-semibold text-white">Select cards</h3>
+                <span className="text-xs text-white/60">{boardFavorites.length} selected</span>
+              </div>
+              <div className="mt-4 max-h-[420px] space-y-3 overflow-auto pr-2 text-sm">
+                {favorites.map((fav) => {
+                  const selected = boardIds.includes(fav.id)
+                  return (
+                    <label
+                      key={fav.id}
+                      className={`flex cursor-pointer items-center gap-3 rounded-2xl border px-3 py-2 ${
+                        selected ? 'border-emerald-400/70 bg-emerald-500/10' : 'border-white/10'
+                      }`}
+                    >
+                      <input type="checkbox" checked={selected} onChange={() => toggleSelection(fav.id)} />
+                      <span className="flex-1 text-white">{fav.photo.description || fav.photo.alt_description || 'Untitled photo'}</span>
+                    </label>
+                  )
+                })}
+              </div>
+            </div>
+            <div className="space-y-4">
+              {boardFavorites.length === 0 ? (
+                <EmptyState title="No cards selected" description="Toggle favorites on the left to add them to the board." />
+              ) : (
+                <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+                  <SortableContext items={boardFavorites.map((fav) => fav.id)} strategy={rectSortingStrategy}>
+                    <div className="grid gap-4 md:grid-cols-2">
+                      {boardFavorites.map((fav) => (
+                        <SortableBoardCard key={fav.id} favorite={fav} />
+                      ))}
+                    </div>
+                  </SortableContext>
+                </DndContext>
+              )}
+            </div>
+          </div>
+        )}
+
+        {sharedPreview ? (
+          <div className="rounded-3xl border border-white/10 bg-white/5 p-6 shadow-lg shadow-slate-900/60">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-xl font-semibold text-white">Shared storyboard preview</h3>
+                <p className="text-sm text-white/70">
+                  Created {new Date(sharedPreview.createdAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}
+                </p>
+              </div>
+              <button
+                onClick={() => typeof window !== 'undefined' && navigator.clipboard?.writeText(window.location.href)}
+                className="text-sm text-white/70 underline-offset-4 hover:underline"
+              >
+                Copy link
+              </button>
+            </div>
+            <div className="mt-4 grid gap-4 md:grid-cols-3">
+              {sharedPreview.items.map((item, idx) => (
+                <div key={idx} className="rounded-2xl border border-white/10 bg-white/10 p-3 text-sm text-white/80">
+                  <img
+                    src={item.photo.thumb || item.photo.regular}
+                    alt={item.photo.alt || 'Shared storyboard'}
+                    className="mb-3 h-36 w-full rounded-xl object-cover"
+                  />
+                  <p>{item.note}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </section>
+  )
+}
+
 function AboutPage() {
   return (
     <section className={sectionClass}>
@@ -724,8 +1052,8 @@ function AboutPage() {
 
 function SettingsPage() {
   const { show } = useToast()
+  const { favorites, clearFavorites, refreshFromCloud, syncing, isCloudEnabled } = useFavorites()
   const [perPage, setPerPage] = useLocalStorage<number>('gallery-per-page', 12)
-  const [favorites, setFavorites] = useLocalStorage<Favorite[]>('photo-favorites', [])
   const [downloadUrl, setDownloadUrl] = React.useState<string | null>(null)
 
   function exportItems() {
@@ -758,36 +1086,58 @@ function SettingsPage() {
   return (
     <section className={sectionClass}>
       <div className="mx-auto max-w-3xl space-y-8">
-        <div className="rounded-3xl border border-white/10 bg-white/5 p-6 shadow-lg shadow-slate-900/60">
-          <p className="text-sm font-semibold uppercase tracking-[0.4em] text-emerald-300">Gallery defaults</p>
-          <h2 className="mt-2 text-2xl font-semibold text-white">Results per page</h2>
-          <input
-            type="range"
-            min={6}
-            max={30}
-            step={3}
-            value={perPage}
-            onChange={(e) => setPerPage(Number(e.target.value))}
-            className="mt-6 w-full accent-emerald-400"
-          />
-          <p className="mt-2 text-sm text-white/70">Currently showing {perPage} photos per page in the gallery.</p>
-        </div>
-
-        <div className="rounded-3xl border border-white/10 bg-white/5 p-6 shadow-lg shadow-slate-900/60">
-          <h3 className="text-xl font-semibold text-white">Favorites</h3>
-          <p className="text-sm text-white/70">Manage your locally stored favorite notes.</p>
-          <div className="mt-4 flex gap-3">
-            <button
-              onClick={() => {
-                setFavorites([])
-                show({ title: 'Favorites cleared', tone: 'info' })
-              }}
-              className="rounded-full border border-white/20 px-4 py-2 text-sm text-white/80 hover:bg-white/10"
-            >
-              Clear favorites ({favorites.length})
-            </button>
+          <div className="rounded-3xl border border-white/10 bg-white/5 p-6 shadow-lg shadow-slate-900/60">
+            <p className="text-sm font-semibold uppercase tracking-[0.4em] text-emerald-300">Gallery defaults</p>
+            <h2 className="mt-2 text-2xl font-semibold text-white">Results per page</h2>
+            <input
+              type="range"
+              min={6}
+              max={30}
+              step={3}
+              value={perPage}
+              onChange={(e) => setPerPage(Number(e.target.value))}
+              className="mt-6 w-full accent-emerald-400"
+            />
+            <p className="mt-2 text-sm text-white/70">Currently showing {perPage} photos per page in the gallery.</p>
           </div>
-        </div>
+
+          <div className="rounded-3xl border border-white/10 bg-white/5 p-6 shadow-lg shadow-slate-900/60">
+            <h3 className="text-xl font-semibold text-white">Favorites</h3>
+            <p className="text-sm text-white/70">
+              {isCloudEnabled ? 'Cloud sync is enabled. You can clear or refresh your favorites.' : 'Currently stored in localStorage.'}
+            </p>
+            <div className="mt-4 flex flex-wrap gap-3">
+              <button
+                onClick={async () => {
+                  try {
+                    await clearFavorites()
+                    show({ title: 'Favorites cleared', tone: 'info' })
+                  } catch (error) {
+                    show({ title: 'Failed to clear', description: (error as Error).message, tone: 'error' })
+                  }
+                }}
+                className="rounded-full border border-white/20 px-4 py-2 text-sm text-white/80 hover:bg-white/10"
+              >
+                Clear favorites ({favorites.length})
+              </button>
+              {isCloudEnabled ? (
+                <button
+                  onClick={async () => {
+                    try {
+                      await refreshFromCloud()
+                      show({ title: 'Favorites synced', tone: 'success' })
+                    } catch (error) {
+                      show({ title: 'Sync failed', description: (error as Error).message, tone: 'error' })
+                    }
+                  }}
+                  disabled={syncing}
+                  className="rounded-full border border-emerald-400/50 bg-emerald-500/10 px-4 py-2 text-sm text-emerald-100 hover:bg-emerald-500/20 disabled:opacity-60"
+                >
+                  {syncing ? 'Syncing…' : 'Refresh from cloud'}
+                </button>
+              ) : null}
+            </div>
+          </div>
 
         <div className="rounded-3xl border border-white/10 bg-white/5 p-6 shadow-lg shadow-slate-900/60">
           <h3 className="text-xl font-semibold text-white">Items backup</h3>
@@ -905,6 +1255,152 @@ function EmptyState({ title, description }: { title: string; description: string
   )
 }
 
+function SortableBoardCard({ favorite }: { favorite: Favorite }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: favorite.id })
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+  }
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={`rounded-3xl border border-white/10 bg-white/5 p-4 text-white shadow-lg shadow-slate-900/60 ${
+        isDragging ? 'opacity-70 ring-2 ring-emerald-300' : ''
+      }`}
+      {...attributes}
+      {...listeners}
+    >
+      <img src={favorite.photo.urls.small} alt={favorite.photo.alt_description || 'Storyboard card'} className="h-32 w-full rounded-2xl object-cover" />
+      <div className="mt-3 space-y-1">
+        <p className="text-sm font-semibold">{favorite.note}</p>
+        <p className="text-xs text-white/60">{favorite.photo.description || favorite.photo.alt_description || 'Untitled photo'}</p>
+      </div>
+    </div>
+  )
+}
+
+function ThemeToggleButton() {
+  const { theme, toggleTheme } = useTheme()
+  const next = theme === 'midnight' ? 'sunrise' : 'midnight'
+  return (
+    <button
+      type="button"
+      onClick={toggleTheme}
+      className="rounded-full border border-white/10 px-4 py-1.5 text-sm text-muted transition hover:bg-surface"
+      aria-label="Toggle theme"
+    >
+      {theme === 'midnight' ? '☀️ Sunrise mode' : '🌙 Midnight mode'}
+      <span className="sr-only">Switch to {next} theme</span>
+    </button>
+  )
+}
+
+function AuthControls() {
+  const { user, loading, isSupabaseConfigured, signIn, signUp, signOut } = useAuth()
+  const { show } = useToast()
+  const [open, setOpen] = React.useState(false)
+  const [mode, setMode] = React.useState<'signin' | 'signup'>('signin')
+  const [email, setEmail] = React.useState('')
+  const [password, setPassword] = React.useState('')
+  const [submitting, setSubmitting] = React.useState(false)
+
+  const handleSubmit = async () => {
+    if (!email || !password) {
+      show({ title: 'Enter email and password', tone: 'error' })
+      return
+    }
+    setSubmitting(true)
+    try {
+      if (mode === 'signin') {
+        await signIn(email, password)
+        show({ title: 'Signed in', tone: 'success' })
+      } else {
+        await signUp(email, password)
+        show({ title: 'Check your inbox to confirm', tone: 'info' })
+      }
+      setOpen(false)
+      setEmail('')
+      setPassword('')
+    } catch (error) {
+      show({ title: 'Auth error', description: (error as Error).message, tone: 'error' })
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const handleSignOut = async () => {
+    try {
+      await signOut()
+      show({ title: 'Signed out', tone: 'info' })
+    } catch (error) {
+      show({ title: 'Sign out failed', description: (error as Error).message, tone: 'error' })
+    }
+  }
+
+  if (!isSupabaseConfigured) {
+    return <span className="rounded-full border border-dashed border-white/20 px-4 py-1 text-xs text-white/60">Cloud disabled</span>
+  }
+
+  if (user) {
+    return (
+      <div className="flex items-center gap-2">
+        <span className="rounded-full bg-surface px-3 py-1 text-xs text-muted">{user.email}</span>
+        <button onClick={handleSignOut} className="rounded-full border border-white/10 px-3 py-1 text-sm text-muted hover:bg-surface">
+          Sign out
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        disabled={loading}
+        className="rounded-full border border-white/10 px-4 py-1.5 text-sm text-muted transition hover:bg-surface disabled:opacity-60"
+      >
+        Sign in
+      </button>
+      <Modal
+        open={open}
+        onClose={() => setOpen(false)}
+        title={mode === 'signin' ? 'Sign in to sync favorites' : 'Create an account'}
+        actions={
+          <>
+            <button onClick={() => setMode(mode === 'signin' ? 'signup' : 'signin')} className="rounded px-3 py-1 text-sm text-slate-600 hover:bg-slate-100">
+              {mode === 'signin' ? 'Need an account?' : 'Have an account?'}
+            </button>
+            <button onClick={handleSubmit} disabled={submitting} className="rounded bg-emerald-500 px-4 py-2 text-white shadow hover:bg-emerald-400 disabled:opacity-60">
+              {submitting ? 'Please wait…' : mode === 'signin' ? 'Sign in' : 'Sign up'}
+            </button>
+          </>
+        }
+      >
+        <div className="space-y-3">
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="Email"
+            className="w-full rounded-xl border border-slate-200 px-3 py-2"
+            autoComplete="email"
+          />
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="Password"
+            className="w-full rounded-xl border border-slate-200 px-3 py-2"
+            autoComplete={mode === 'signin' ? 'current-password' : 'new-password'}
+          />
+        </div>
+      </Modal>
+    </>
+  )
+}
+
 export default function App() {
   return (
     <HashRouter>
@@ -912,6 +1408,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<HomePage />} />
           <Route path="/gallery" element={<GalleryPage />} />
+          <Route path="/storyboard" element={<StoryboardPage />} />
           <Route path="/items" element={<ItemsPage />} />
           <Route path="/items/:id" element={<ItemDetailPage />} />
           <Route path="/about" element={<AboutPage />} />
